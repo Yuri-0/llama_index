@@ -9,6 +9,7 @@ from llama_index.core.llms.utils import LLMType, resolve_llm
 from llama_index.core.prompts import PromptTemplate
 from llama_index.core.prompts.mixin import PromptDictType
 from llama_index.core.retrievers import BaseRetriever
+from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.schema import IndexNode, NodeWithScore, QueryBundle
 from llama_index.core.settings import Settings
 
@@ -45,6 +46,7 @@ class QueryFusionRetriever(BaseRetriever):
         objects: Optional[List[IndexNode]] = None,
         object_map: Optional[dict] = None,
         retriever_weights: Optional[List[float]] = None,
+        node_postprocessors: Optional[List[BaseNodePostprocessor]] = None,
     ) -> None:
         self.num_queries = num_queries
         self.query_gen_prompt = query_gen_prompt or QUERY_GEN_PROMPT
@@ -53,6 +55,7 @@ class QueryFusionRetriever(BaseRetriever):
         self.use_async = use_async
 
         self._retrievers = retrievers
+        self._node_postprocessors = node_postprocessors or []
         if retriever_weights is None:
             self._retriever_weights = [1.0 / len(retrievers)] * len(retrievers)
         else:
@@ -222,7 +225,7 @@ class QueryFusionRetriever(BaseRetriever):
         tasks, task_queries = [], []
         for query in queries:
             for i, retriever in enumerate(self._retrievers):
-                tasks.append(retriever.aretrieve(query))
+                tasks.append(self._run_async_retrieve(retriever, query))
                 task_queries.append((query.query_str, i))
 
         task_results = run_async_tasks(tasks)
@@ -239,7 +242,7 @@ class QueryFusionRetriever(BaseRetriever):
         tasks, task_queries = [], []
         for query in queries:
             for i, retriever in enumerate(self._retrievers):
-                tasks.append(retriever.aretrieve(query))
+                tasks.append(self._run_async_retrieve(retriever, query))
                 task_queries.append((query.query_str, i))
 
         task_results = await asyncio.gather(*tasks)
@@ -256,9 +259,25 @@ class QueryFusionRetriever(BaseRetriever):
         results = {}
         for query in queries:
             for i, retriever in enumerate(self._retrievers):
-                results[(query.query_str, i)] = retriever.retrieve(query)
+                nodes = retriever.aretrieve(query)
+                results[(query.query_str, i)] = self._apply_node_postprocessors(nodes, query_bundle=query)
 
         return results
+
+    async def _run_async_retrieve(
+            self, retriever: BaseRetriever, query_bundle: QueryBundle
+    ) -> List[NodeWithScore]:
+        nodes = await retriever.aretrieve(query_bundle)
+        return self._apply_node_postprocessors(nodes, query_bundle=query_bundle)
+
+    def _apply_node_postprocessors(
+            self, nodes: List[NodeWithScore], query_bundle: QueryBundle
+    ) -> List[NodeWithScore]:
+        for node_postprocessor in self._node_postprocessors:
+            nodes = node_postprocessor.postprocess_nodes(
+                nodes, query_bundle=query_bundle
+            )
+        return nodes
 
     def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
         queries: List[QueryBundle] = [query_bundle]
